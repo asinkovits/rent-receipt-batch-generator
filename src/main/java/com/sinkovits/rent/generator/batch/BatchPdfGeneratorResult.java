@@ -49,5 +49,9 @@ public class BatchPdfGeneratorResult {
 			return result;
 		}
 
+		public boolean hasErrors() {
+			return !errors.isEmpty();
+		}
+
 	}
 }
