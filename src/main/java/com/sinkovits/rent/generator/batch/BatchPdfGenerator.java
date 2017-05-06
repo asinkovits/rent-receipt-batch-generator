@@ -1,5 +1,7 @@
 package com.sinkovits.rent.generator.batch;
 
+import static org.springframework.util.Assert.notNull;
+
 import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Path;
@@ -10,27 +12,31 @@ import java.util.Optional;
 
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.PDPageContentStream;
-import org.apache.pdfbox.pdmodel.PDPageContentStream.AppendMode;
-import org.apache.pdfbox.pdmodel.common.PDRectangle;
-import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.sinkovits.rent.generator.batch.BatchPdfGeneratorResult.BatchPdfGeneratorResultBuilder;
+import com.sinkovits.rent.generator.batch.processor.FileProcessor;
 
 public class BatchPdfGenerator {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(BatchPdfGenerator.class);
 
 	private PathMatcher pdfMatcher = FileSystems.getDefault().getPathMatcher("glob:*.pdf");
+	private PDDocumentHolder documentHolder = new PDDocumentHolder();
+	private FileProcessor processor;
 
 	public BatchPdfGeneratorResult generate(List<Path> files, Path outputFile) throws Exception {
+		notNull(processor, "File processor is not set!");
 		BatchPdfGeneratorResultBuilder resultBuilder = BatchPdfGeneratorResult.builder();
-		validateInputFiles(resultBuilder, files);
-		validateOutputFile(resultBuilder, outputFile);
-		if (!resultBuilder.hasErrors()) {
-			generateBatchPdf(resultBuilder, files, outputFile);
+		try {
+			validateInputFiles(resultBuilder, files);
+			validateOutputFile(resultBuilder, outputFile);
+			if (!resultBuilder.hasErrors()) {
+				generateBatchPdf(resultBuilder, files, outputFile);
+			}
+		} finally {
+			documentHolder.close();
 		}
 		return resultBuilder.result();
 	}
@@ -72,62 +78,48 @@ public class BatchPdfGenerator {
 
 	private void generateBatchPdf(BatchPdfGeneratorResultBuilder resultBuilder, List<Path> files, Path outputFile)
 			throws IOException {
-		List<PDDocument> pdfFiles = new ArrayList<>();
-		try {
-			processFiles(files, pdfFiles);
-			validateProcessedFiles(resultBuilder, pdfFiles);
-			if (!resultBuilder.hasErrors()) {
-				saveFinalPdf(outputFile, pdfFiles);
-			}
-		} finally {
-			closeDocuments(pdfFiles);
+
+		processFiles(files);
+		validateProcessedFiles(resultBuilder);
+		if (!resultBuilder.hasErrors()) {
+			saveFinalPdf(outputFile);
 		}
 	}
 
-	private void processFiles(List<Path> files, List<PDDocument> pdfFiles) throws IOException {
+	private void processFiles(List<Path> files) throws IOException {
 		for (Path path : files) {
 			Optional<PDDocument> document = processFile(path);
-			document.ifPresent(doc -> pdfFiles.add(doc));
+			document.ifPresent(doc -> documentHolder.addDocument(doc));
 			if (!document.isPresent()) {
 				LOGGER.warn(path + " could not be converted. Skipping!");
 			}
 		}
 	}
 
-	private void validateProcessedFiles(BatchPdfGeneratorResultBuilder resultBuilder, List<PDDocument> pdfFiles) {
-		if (pdfFiles.isEmpty()) {
+	private void validateProcessedFiles(BatchPdfGeneratorResultBuilder resultBuilder) {
+		if (documentHolder.isEmpty()) {
 			resultBuilder.setStatus(BatchPdfGeneratorResult.STATUS_ERROR);
 			resultBuilder.addErrorMessage("None of the input files could be processed!");
 		}
 	}
 
 	private Optional<PDDocument> processFile(Path path) throws IOException {
-		PDDocument doc = new PDDocument();
-		PDPage page = new PDPage();
-		PDImageXObject pdImage = PDImageXObject.createFromFileByExtension(path.toFile(), doc);
-		PDPageContentStream contentStream = new PDPageContentStream(doc, page, AppendMode.APPEND, true);
-		float scale = calculateScale(pdImage, page.getBBox());
-		contentStream.drawImage(pdImage, 0, 0, pdImage.getWidth() * scale, pdImage.getHeight() * scale);
-		contentStream.close();
-		doc.addPage(page);
-		return Optional.of(doc);
+		if (processor.canProcess(path)) {
+			return processor.process(path);
+		} else {
+			return Optional.empty();
+		}
 	}
 
-	private float calculateScale(PDImageXObject pdImage, PDRectangle bBox) {
-		float xs = bBox.getWidth() / pdImage.getWidth();
-		float ys = bBox.getHeight() / pdImage.getHeight();
-		return Math.min(xs, ys);
-	}
-
-	private void saveFinalPdf(Path outputFile, List<PDDocument> pdfFiles) throws IOException {
-		try (PDDocument doc = mergeDocuments(pdfFiles)) {
+	private void saveFinalPdf(Path outputFile) throws IOException {
+		try (PDDocument doc = mergeDocuments()) {
 			doc.save(outputFile.toFile());
 		}
 	}
 
-	private PDDocument mergeDocuments(List<PDDocument> pdfFiles) throws IOException {
+	private PDDocument mergeDocuments() throws IOException {
 		PDDocument doc = new PDDocument();
-		for (PDDocument pdf : pdfFiles) {
+		for (PDDocument pdf : documentHolder.getDocuments()) {
 			merge(doc, pdf);
 		}
 		return doc;
@@ -139,13 +131,8 @@ public class BatchPdfGenerator {
 		}
 	}
 
-	private void closeDocuments(List<PDDocument> pdfFiles) {
-		for (PDDocument pdDocument : pdfFiles) {
-			try {
-				pdDocument.close();
-			} catch (IOException ex) {
-				ex.printStackTrace();
-			}
-		}
+	public void setProcessor(FileProcessor processor) {
+		this.processor = processor;
 	}
+
 }
